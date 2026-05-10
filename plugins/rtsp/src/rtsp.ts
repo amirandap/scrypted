@@ -26,7 +26,7 @@ export class RtspCamera extends CameraBase<UrlMediaStreamOptions> {
     getRawVideoStreamOptions(): UrlMediaStreamOptions[] {
         let urls: string[] = [];
         try {
-            urls = JSON.parse(this.storage.getItem('urls'));
+            urls = JSON.parse(this.storage.getItem('urls') ?? '[]');
         }
         catch (e) {
             const url = this.storage.getItem('url');
@@ -41,7 +41,7 @@ export class RtspCamera extends CameraBase<UrlMediaStreamOptions> {
         const ret = urls.filter(url => !!url).map((url, index) => createRtspMediaStreamOptions(url, index));
 
         if (!ret.length)
-            return;
+            return [];
         return ret;
     }
 
@@ -86,12 +86,12 @@ export class RtspCamera extends CameraBase<UrlMediaStreamOptions> {
 
     // hide the description from CameraBase that indicates it is only used for snapshots
     getUsernameDescription(): string {
-        return;
+        return '';
     }
 
     // hide the description from CameraBase that indicates it is only used for snapshots
     getPasswordDescription(): string {
-        return;
+        return '';
     }
 
     async getRtspUrlSettings(): Promise<Setting[]> {
@@ -152,7 +152,9 @@ export interface Destroyable {
 
 export abstract class RtspSmartCamera extends RtspCamera {
     lastListen = 0;
-    listener: Promise<Destroyable>;
+    listener: Promise<Destroyable> | undefined;
+    listenFailCount = 0;
+    listenCircuitUntil = 0;
 
     constructor(nativeId: string, provider: RtspProvider) {
         super(nativeId, provider);
@@ -171,6 +173,17 @@ export abstract class RtspSmartCamera extends RtspCamera {
     }
 
     async listenLoop() {
+        // Circuit breaker: if too many consecutive short-lived failures, wait before retrying.
+        if (this.listenCircuitUntil) {
+            const waitMs = this.listenCircuitUntil - Date.now();
+            if (waitMs > 0) {
+                this.console.error(`listen loop circuit open, waiting ${Math.round(waitMs / 1000)}s before next attempt.`);
+                setTimeout(() => this.listenLoop(), waitMs);
+                return;
+            }
+            this.listenCircuitUntil = 0;
+        }
+
         this.resetSensors();
         this.lastListen = Date.now();
         if (this.listener)
@@ -186,15 +199,38 @@ export abstract class RtspSmartCamera extends RtspCamera {
             clearTimeout(activityTimeout);
             listener?.destroy();
             const listenDuration = Date.now() - this.lastListen;
-            const listenNext = listenDuration > 10000 ? 0 : 10000;
-            setTimeout(() => this.listenLoop(), listenNext);
+
+            // If the connection was stable for >60s, it was a real disconnect — reset failure counter.
+            if (listenDuration > 60000) {
+                this.listenFailCount = 0;
+            } else {
+                this.listenFailCount++;
+            }
+
+            // Circuit breaker: after 10 consecutive short failures, pause for 10 minutes.
+            if (this.listenFailCount >= 10) {
+                const pauseMs = 600000;
+                this.console.error(`listen loop circuit breaker: ${this.listenFailCount} consecutive short-lived failures, pausing for ${pauseMs / 60000} minutes.`);
+                this.listenCircuitUntil = Date.now() + pauseMs;
+                this.listenFailCount = 0;
+                setTimeout(() => this.listenLoop(), pauseMs);
+                return;
+            }
+
+            // Exponential backoff: 10s, 20s, 40s … capped at 5 minutes.
+            const backoffMs = this.listenFailCount > 0
+                ? Math.min(10000 * Math.pow(2, this.listenFailCount - 1), 300000)
+                : 0;
+            if (backoffMs > 0)
+                this.console.error(`listen loop restarting in ${Math.round(backoffMs / 1000)}s (consecutive failures: ${this.listenFailCount}).`);
+            setTimeout(() => this.listenLoop(), backoffMs);
         }
 
         try {
             listener = await this.listener;
         }
         catch (e) {
-            this.console.error('listen loop connection failed, restarting listener.', e.message);
+            this.console.error('listen loop connection failed, restarting listener.', (e as Error)?.message ?? e);
             restartListener();
             return;
         }
@@ -347,7 +383,7 @@ export abstract class RtspSmartCamera extends RtspCamera {
         return `${this.getIPAddress()}:${this.storage.getItem('rtspPort') || 554}`;
     }
 
-    constructedVideoStreamOptions: Promise<UrlMediaStreamOptions[]>;
+    constructedVideoStreamOptions: Promise<UrlMediaStreamOptions[]> | undefined;
     async getVideoStreamOptions(): Promise<UrlMediaStreamOptions[]> {
         if (this.showRtspUrlOverride()) {
             const vsos = await super.getVideoStreamOptions();
