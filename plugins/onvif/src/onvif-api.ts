@@ -92,9 +92,9 @@ export class OnvifCameraAPI {
     }
 
     listenEvents() {
-        const ret = new EventEmitter();
+        const ret = new EventEmitter() as EventEmitter & { destroy(): void };
 
-        this.cam.on('event', (event: any, xml: string) => {
+        const handler = (event: any, xml: string) => {
             ret.emit('data', xml);
 
             if (!event.message.message.data?.simpleItem?.$)
@@ -164,7 +164,16 @@ export class OnvifCameraAPI {
                     }
                 }
             }
-        });
+        };
+        this.cam.on('event', handler);
+
+        // Cleanup: remove the cam listener and all downstream EventEmitter listeners.
+        // Called by onvif-events.ts destroy() to prevent listener accumulation on reconnect.
+        ret.destroy = () => {
+            this.cam.removeListener('event', handler);
+            ret.removeAllListeners();
+        };
+
         return ret;
     }
 
@@ -380,6 +389,18 @@ export class OnvifCameraAPI {
         return promisify(cb => {
             this.cam.setOSD(osd, cb);
         });
+    }
+
+    /**
+     * Release all resources held by this API instance.
+     * Removes all cam event listeners and attempts to close the underlying HTTP socket
+     * so the orphaned Cam from a previous reconnect cycle can be GC'd.
+     */
+    destroy() {
+        try { this.cam.removeAllListeners(); } catch (e) {}
+        // The onvif library holds the socket in cam._socket (undocumented internal).
+        // Destroy it if accessible so the polling loop stops immediately.
+        try { (this.cam as any)._socket?.destroy(); } catch (e) {}
     }
 }
 
