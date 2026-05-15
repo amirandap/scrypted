@@ -184,9 +184,12 @@ class OnvifCamera extends RtspSmartCamera implements ObjectDetector, Intercom, V
 
 
     async listenEvents() {
-        const client = await this.createClient();
+        // One-time device capability discovery with a throwaway client.
+        // Kept separate so it doesn't block the self-healing subscription loop.
         try {
-            const eventTypes = await client.getEventTypes();
+            const initClient = await this.createClient();
+            const eventTypes = await initClient.getEventTypes().catch(() => [] as string[]);
+            initClient.destroy();
             if (eventTypes?.length && this.storage.getItem('onvifDetector') !== 'true') {
                 this.storage.setItem('onvifDetector', 'true');
                 this.updateDevice();
@@ -195,7 +198,9 @@ class OnvifCamera extends RtspSmartCamera implements ObjectDetector, Intercom, V
         catch (e) {
         }
 
-        return listenEvents(this, client);
+        // Pass a factory so listenEvents can silently reconnect on its own
+        // without triggering a full outer listenLoop restart on every disconnect.
+        return listenEvents(this, () => this.createClient());
     }
 
     createClient() {
