@@ -40,3 +40,28 @@ python3 patches/nvr/patch-nvr.py --restart   # apply + restart NVR
 ```
 
 Re-run after each NVR plugin update.
+
+## CI/CD Pipeline
+
+### GitHub Actions (`.github/workflows/`)
+
+| Workflow | Trigger | Purpose |
+|----------|---------|---------|
+| `sync-upstream.yml` | Weekly (Mon 06:00 UTC) + manual | Rebase `fixes/all-my-patches` onto `koush/scrypted:main`. Opens a GitHub Issue if there's a conflict. |
+| `validate-patches.yml` | Push/PR to `patches/**` | Validates patch script syntax and tests apply/idempotency against synthetic bundles. |
+
+### On-machine watcher (production server)
+
+`/root/scrypted/scripts/nvr-patch-watcher.py` — runs every 15 minutes via cron.
+
+- Detects NVR bundle replacement (auto-updates change the mtime)
+- Re-applies patches automatically if `MISSING`
+- Logs `UNKNOWN` with manual recovery steps if bundle format changed
+- State file: `~/.scrypted/nvr-patch-watcher.json`
+- Log: `/var/log/nvr-patch-watcher.log`
+
+**Manual check:**
+```bash
+python3 /root/scrypted/scripts/nvr-patch-watcher.py
+cat /var/log/nvr-patch-watcher.log | tail -20
+```

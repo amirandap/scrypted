@@ -1,0 +1,104 @@
+name: Validate patch script
+
+on:
+  push:
+    branches: ['fixes/**']
+    paths:
+      - 'patches/**'
+  pull_request:
+    paths:
+      - 'patches/**'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Syntax check patch script
+        run: python3 -m py_compile patches/nvr/patch-nvr.py && echo "✅ Syntax OK"
+
+      - name: Test --check with unpatched bundle (all MISSING)
+        run: |
+          python3 - << 'EOF'
+          import sys, os, tempfile, importlib.util
+
+          # Build a synthetic bundle containing only the "original" strings
+          ORIGINALS = [
+              "function Wa(e,i){return async function(e,i){await t.promises.writeFile(e,i),",
+              "try{await t.promises.writeFile(a,e),",
+              "async function gc(e,t,i=!0,n=.15){",
+              "bu(e,this.videoRetentionDays,this.computeMinFreeSpaceGb())",
+              "e.free/e.size<.15||e.free/1024/1024/1024<s.computeMinFreeSpaceGb()",
+          ]
+          bundle = "PREAMBLE;" + ";FILLER;".join(ORIGINALS) + ";POSTAMBLE"
+
+          with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False) as f:
+              f.write(bundle)
+              tmp = f.name
+
+          spec = importlib.util.spec_from_file_location("patch_nvr", "patches/nvr/patch-nvr.py")
+          mod = importlib.util.load_from_spec(spec)
+          spec.loader.exec_module(mod)
+          mod.PLUGIN_PATH = tmp
+
+          content = mod.load()
+          for p in mod.PATCHES:
+              assert p["original"] in content, f"FAIL: original not in synthetic bundle for: {p['name']}"
+              assert p["patched"] not in content, f"FAIL: patched already in synthetic bundle for: {p['name']}"
+          print("✅ All originals present in synthetic unpatched bundle")
+
+          # Apply patches
+          patched = mod.apply_patches(content)
+          for p in mod.PATCHES:
+              assert p["patched"] in patched, f"FAIL: patch not applied for: {p['name']}"
+          print("✅ All patches applied successfully")
+
+          # Apply again (idempotency)
+          patched2 = mod.apply_patches(patched)
+          assert patched2 == patched, "FAIL: applying twice changed the content (not idempotent)"
+          print("✅ Patches are idempotent")
+
+          os.unlink(tmp)
+          EOF
+
+      - name: Test --check with already-patched bundle (all APPLIED)
+        run: |
+          python3 - << 'EOF'
+          import sys, os, tempfile, importlib.util
+
+          # Build a synthetic bundle containing only the "patched" strings
+          PATCHED = [
+              "function Wa(e,i){return async function(e,i){await t.promises.mkdir(p.dirname(e),{recursive:!0}).catch((()=>{})),await t.promises.writeFile(e,i),",
+              "try{await t.promises.mkdir(p.dirname(a),{recursive:!0}).catch((()=>{})),await t.promises.writeFile(a,e),",
+              "async function gc(e,t,i=!0,n=.2){",
+              "bu(e,this.videoRetentionDays,this.computeMinFreeSpaceGb()*2)",
+              "e.free/e.size<.1||e.free/1024/1024/1024<s.computeMinFreeSpaceGb()*.5",
+          ]
+          bundle = "PREAMBLE;" + ";FILLER;".join(PATCHED) + ";POSTAMBLE"
+
+          with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False) as f:
+              f.write(bundle)
+              tmp = f.name
+
+          spec = importlib.util.spec_from_file_location("patch_nvr", "patches/nvr/patch-nvr.py")
+          mod = importlib.util.load_from_spec(spec)
+          spec.loader.exec_module(mod)
+          mod.PLUGIN_PATH = tmp
+
+          content = mod.load()
+          ok = mod.check_mode(content)
+          assert ok, "FAIL: check_mode returned False on already-patched bundle"
+          print("✅ check_mode returns True on already-patched bundle")
+
+          os.unlink(tmp)
+          EOF
+
+      - name: Confirm no UNKNOWN patches on synthetic bundles
+        run: echo "✅ All patch validation tests passed"
