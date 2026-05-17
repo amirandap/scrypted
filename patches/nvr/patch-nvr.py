@@ -23,48 +23,48 @@ PLUGIN_PATH = os.path.expanduser(
 PATCHES = [
     # Fix 1: mkdir before writeFile in Wa() — session metadata writer (pruner side)
     # Prevents ENOENT crash when a new recording directory has no parent yet.
+    # Strings match NVR bundle v1.0.212 (t.promises API, p = require('path')).
     {
         "name": "mkdir before writeFile in Wa() (session metadata)",
         "original": (
-            "async function Wa(e,t){"
-            "await oe.writeFile(e,JSON.stringify(t))"
+            "function Wa(e,i){return async function(e,i){"
+            "await t.promises.writeFile(e,i),"
         ),
         "patched": (
-            "async function Wa(e,t){"
-            "await oe.mkdir(require('path').dirname(e),{recursive:true});"
-            "await oe.writeFile(e,JSON.stringify(t))"
+            "function Wa(e,i){return async function(e,i){"
+            "await t.promises.mkdir(p.dirname(e),{recursive:!0}).catch((()=>{})),"
+            "await t.promises.writeFile(e,i),"
         ),
     },
 
-    # Fix 2: mkdir before writeFile in fetchRecordingStreamThumbnail
+    # Fix 2: mkdir before writeFile in thumbnail cache writer
     # Prevents ENOENT crash when the thumbnail cache directory doesn't exist.
     {
-        "name": "mkdir before writeFile in fetchRecordingStreamThumbnail",
+        "name": "mkdir before writeFile in thumbnail cache",
         "original": (
-            "await oe.writeFile(s,i)"
-            "}catch(e){this.console.error"
+            "try{await t.promises.writeFile(a,e),"
         ),
         "patched": (
-            "await oe.mkdir(require('path').dirname(s),{recursive:true});"
-            "await oe.writeFile(s,i)"
-            "}catch(e){this.console.error"
+            "try{await t.promises.mkdir(p.dirname(a),{recursive:!0}).catch((()=>{})),"
+            "await t.promises.writeFile(a,e),"
         ),
     },
 
-    # Fix 3a: Raise pruner gc() default free-pct threshold 15% -> 20%
+    # Fix 3a: Raise gc() default free-pct threshold 15% -> 20%
     # gc() is the core garbage-collection loop; this is its default trigger level.
+    # Note: in v1.0.212 the third param default changed from !1 to !0 (log enabled).
     {
         "name": "gc() default pct threshold 0.15 -> 0.20",
-        "original": "async gc(e,t,i=!1,n=.15){",
-        "patched":  "async gc(e,t,i=!1,n=.20){",
+        "original": "async function gc(e,t,i=!0,n=.15){",
+        "patched":  "async function gc(e,t,i=!0,n=.2){",
     },
 
     # Fix 3b: Pruner passes 2x minFreeSpaceGb instead of 1x for extra headroom.
     # Gives the pruner a larger lead time before recordings are refused.
     {
         "name": "Pruner bu() passes computeMinFreeSpaceGb()*2",
-        "original": "this.gc(e,this.computeMinFreeSpaceGb(),!0)",
-        "patched":  "this.gc(e,this.computeMinFreeSpaceGb()*2,!0)",
+        "original": "bu(e,this.videoRetentionDays,this.computeMinFreeSpaceGb())",
+        "patched":  "bu(e,this.videoRetentionDays,this.computeMinFreeSpaceGb()*2)",
     },
 
     # Fix 3c: Recording-stop threshold lowered to 10% / 0.5x so the pruner
@@ -72,12 +72,10 @@ PATCHES = [
     {
         "name": "Recording stop 0.15/1x -> 0.10/0.5x (last-resort tier)",
         "original": (
-            "if(f<.15||r<this.computeMinFreeSpaceGb())"
-            "{this.console.warn"
+            "e.free/e.size<.15||e.free/1024/1024/1024<s.computeMinFreeSpaceGb()"
         ),
         "patched": (
-            "if(f<.10||r<this.computeMinFreeSpaceGb()*.5)"
-            "{this.console.warn"
+            "e.free/e.size<.1||e.free/1024/1024/1024<s.computeMinFreeSpaceGb()*.5"
         ),
     },
 ]
