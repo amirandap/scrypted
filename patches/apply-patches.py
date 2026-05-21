@@ -49,6 +49,68 @@ PATCHES = [
         "pyc": None,
     },
     {
+        # When canMixin() throws "not implemented" (plugin loading/restarting),
+        # the catch block sets error=e (truthy). The ensureProxy() then merges old
+        # interfaces back, calls setPluginDeviceState → changed=true →
+        # notifyPluginDeviceDescriptorChanged → rebuildMixinTable → infinite loop.
+        # Load average spikes to 19+, plugin pings fail, all plugins restart in cascade.
+        # Fix: treat "not implemented" as a temporary passthrough (no error flag),
+        # so the interface set stabilizes and the notify loop stops.
+        "name": "Server rebuildEntry — canMixin 'not implemented' treated as passthrough to break infinite loop",
+        "file": "/server/node_modules/@scrypted/server/dist/plugin/plugin-device.js",
+        "old": (
+            "        catch (e) {\n"
+            "            // on any error, do not advertise interfaces\n"
+            "            // on this mixin, so as to prevent total failure?\n"
+            "            // this has been the behavior for a while,\n"
+            "            // but maybe interfaces implemented by that mixin\n"
+            "            // should rethrow the error caught here in applyMixin.\n"
+            "            console.error('Mixin error', e);\n"
+            "            return {\n"
+            "                passthrough: false,\n"
+            "                allInterfaces,\n"
+            "                interfaces: new Set(),\n"
+            "                error: e,\n"
+            "                proxy: undefined,\n"
+            "            };\n"
+            "        }"
+        ),
+        "new": (
+            "        catch (e) {\n"
+            "            // When canMixin throws \"not implemented\", the mixin provider plugin is\n"
+            "            // loading or temporarily unavailable. Treat as passthrough (no error)\n"
+            "            // so the notify loop doesn't spin: error=true causes interface merging\n"
+            "            // which triggers notifyPluginDeviceDescriptorChanged which triggers\n"
+            "            // another rebuildMixinTable indefinitely.\n"
+            "            if (e?.message?.includes('not implemented')) {\n"
+            "                console.warn(`Mixin provider ${mixinId} canMixin threw \"not implemented\" for ${this.id} — treating as temporary passthrough.`);\n"
+            "                return {\n"
+            "                    passthrough: true,\n"
+            "                    allInterfaces,\n"
+            "                    interfaces: new Set(),\n"
+            "                    error: undefined,\n"
+            "                    proxy: undefined,\n"
+            "                };\n"
+            "            }\n"
+            "            // on any error, do not advertise interfaces\n"
+            "            // on this mixin, so as to prevent total failure?\n"
+            "            // this has been the behavior for a while,\n"
+            "            // but maybe interfaces implemented by that mixin\n"
+            "            // should rethrow the error caught here in applyMixin.\n"
+            "            console.error('Mixin error', e);\n"
+            "            return {\n"
+            "                passthrough: false,\n"
+            "                allInterfaces,\n"
+            "                interfaces: new Set(),\n"
+            "                error: e,\n"
+            "                proxy: undefined,\n"
+            "            };\n"
+            "        }"
+        ),
+        "verify": "canMixin threw \"not implemented\"",
+        "pyc": None,
+    },
+    {
         "name": "OpenVINO GPU THROUGHPUT mode",
         "file": "/root/.scrypted/volume/plugins/@scrypted/openvino/zip/unzipped/ov/__init__.py",
         "old": '"GPU_QUEUE_THROTTLE": "MEDIUM",\n                    "PERFORMANCE_HINT": "LATENCY",',

@@ -54,8 +54,8 @@ PATCHES = [
     # gc() is the core garbage-collection loop; this is its default trigger level.
     # Note: in v1.0.212 the third param default changed from !1 to !0 (log enabled).
     {
-        "name": "gc() default pct threshold 0.15 -> 0.20",
-        "original": "async function gc(e,t,i=!0,n=.15){",
+        "name": "gc() default pct threshold 0.1 -> 0.2",
+        "original": "async function gc(e,t,i=!0,n=.1){",
         "patched":  "async function gc(e,t,i=!0,n=.2){",
     },
 
@@ -67,16 +67,16 @@ PATCHES = [
         "patched":  "bu(e,this.videoRetentionDays,this.computeMinFreeSpaceGb()*2)",
     },
 
-    # Fix 3c: Recording-stop threshold lowered to 10% / 0.5x so the pruner
-    # (tier 1 at 20% / 2x) always fires well before recordings are refused.
+    # Fix 3c: Recording-stop threshold lowered from 5% -> 3% so the pruner
+    # (tier 1 at 20%) always fires well before recordings are refused.
+    # v1.0.212 only checks free/size ratio here (no computeMinFreeSpaceGb in the
+    # events arrow). DO NOT inject `s.computeMinFreeSpaceGb()` into this arrow:
+    # the same scope hoists `const s=R(i)`, which would cause a TDZ ReferenceError
+    # ("Cannot access 's' before initialization") and break NVR (events) entirely.
     {
-        "name": "Recording stop 0.15/1x -> 0.10/0.5x (last-resort tier)",
-        "original": (
-            "e.free/e.size<.15||e.free/1024/1024/1024<s.computeMinFreeSpaceGb()"
-        ),
-        "patched": (
-            "e.free/e.size<.1||e.free/1024/1024/1024<s.computeMinFreeSpaceGb()*.5"
-        ),
+        "name": "Recording stop free/size threshold 0.05 -> 0.03",
+        "original": 'const e=await sc(t);if(e.free/e.size<.05)throw new Error("Low disk space, stopping recording.")',
+        "patched":  'const e=await sc(t);if(e.free/e.size<.03)throw new Error("Low disk space, stopping recording.")',
     },
 ]
 
