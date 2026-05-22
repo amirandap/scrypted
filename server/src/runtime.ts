@@ -531,11 +531,20 @@ export class ScryptedRuntime extends PluginHttp<HttpPluginData> {
         }
 
         // second pass:
-        // rebuild the mixin tables.
-        for (const id of ret) {
+        // rebuild the mixin tables — staggered via setImmediate so each camera rebuild
+        // yields to the I/O phase between rebuilds. This prevents the combined flood of
+        // concurrent RPC calls from starving plugin ping callbacks and cascade-killing
+        // all plugins whenever any single plugin restarts.
+        const rebuildIds = [...ret];
+        const scheduleNext = () => {
+            const id = rebuildIds.shift();
+            if (!id)
+                return;
             const device = this.devices[id];
-            device!.handler.rebuildMixinTable();
-        }
+            device?.handler.rebuildMixinTable();
+            setImmediate(scheduleNext);
+        };
+        setImmediate(scheduleNext);
 
         return ret;
     }
