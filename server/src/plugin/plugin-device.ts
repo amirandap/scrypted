@@ -218,6 +218,12 @@ export class PluginDeviceProxyHandler implements PrimitiveProxyHandler<any> {
     }
 
     async rebuildEntry(pluginDevice: PluginDevice, mixinId: string, wrappedMixinTablePromise: Promise<MixinTable[]>): Promise<MixinTableEntry> {
+        // Yield to the I/O phase of the event loop before each mixin rebuild step.
+        // Without this, rebuilding many cameras' mixin tables simultaneously creates a
+        // flood of chained microtasks that starves I/O callbacks — including plugin ping
+        // responses — causing all plugins to appear unresponsive and cascade-restart.
+        await new Promise<void>(resolve => setImmediate(resolve));
+
         const wrappedMixinTable = await wrappedMixinTablePromise;
         const previousEntry = wrappedMixinTable[0]!.entry;
 
