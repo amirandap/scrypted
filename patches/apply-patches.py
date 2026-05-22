@@ -1,21 +1,71 @@
 #!/usr/bin/env python3
 """
-Re-apply all Scrypted performance patches after a plugin update.
-Run this after any Scrypted plugin update that touches openvino or objectdetector.
+Re-apply all Scrypted performance patches after a plugin update or container recreate.
 
 Usage:
-    python3 /root/patches/apply-patches.sh
-    # or:
-    /root/patches/apply-patches.sh
+    python3 /root/patches/apply-patches.py
+
+Two patch types:
+  - "copy":  copies a compiled JS file from the fork's dist/ into the container's
+             node_modules. Use this for files owned in the fork TypeScript source.
+  - "string": applies a targeted string substitution for files we don't own (plugin JS).
 """
 import sys
 
 PATCHES = [
+    # ─── Server dist/ files (compiled from TypeScript fork) ─────────────────────
+    # These replace the container's dist/ files with our compiled versions, which
+    # include: MixinRebuildScheduler, RPC timeout middleware, and error classification.
+    {
+        "type": "copy",
+        "name": "Server dist — plugin-device.js (error classification + setImmediate notify deferral)",
+        "src": "/root/scrypted/fork/server/dist/plugin/plugin-device.js",
+        "dst": "/server/node_modules/@scrypted/server/dist/plugin/plugin-device.js",
+        "verify_src": "classifyRpcError",
+    },
+    {
+        "type": "copy",
+        "name": "Server dist — runtime.js (MixinRebuildScheduler wired in)",
+        "src": "/root/scrypted/fork/server/dist/runtime.js",
+        "dst": "/server/node_modules/@scrypted/server/dist/runtime.js",
+        "verify_src": "mixinRebuildScheduler",
+    },
+    {
+        "type": "copy",
+        "name": "Server dist — mixin-rebuild-scheduler.js (new file)",
+        "src": "/root/scrypted/fork/server/dist/plugin/mixin-rebuild-scheduler.js",
+        "dst": "/server/node_modules/@scrypted/server/dist/plugin/mixin-rebuild-scheduler.js",
+        "verify_src": "MixinRebuildScheduler",
+    },
+    {
+        "type": "copy",
+        "name": "Server dist — rpc.js (per-call RPC timeouts)",
+        "src": "/root/scrypted/fork/server/dist/rpc.js",
+        "dst": "/server/node_modules/@scrypted/server/dist/rpc.js",
+        "verify_src": "RPC_TIMEOUT_MAP",
+    },
+    {
+        "type": "copy",
+        "name": "Server dist — rpc-timeout.js (new file)",
+        "src": "/root/scrypted/fork/server/dist/rpc-timeout.js",
+        "dst": "/server/node_modules/@scrypted/server/dist/rpc-timeout.js",
+        "verify_src": "RpcTimeoutError",
+    },
+    {
+        "type": "copy",
+        "name": "Server dist — rpc-errors.js (new file)",
+        "src": "/root/scrypted/fork/server/dist/rpc-errors.js",
+        "dst": "/server/node_modules/@scrypted/server/dist/rpc-errors.js",
+        "verify_src": "classifyRpcError",
+    },
+
+    # ─── Plugin files (string patches — files we don't own) ─────────────────────
     {
         # The Hikvision alertStream IIFE uses n.socket.setKeepAlive(true) but only calls
         # n.destroy() on error / close, not n.socket.destroy().  This leaves the TCP socket
         # open and the camera keeps streaming data into a dead buffer → recv-Q grows
         # continuously → Node.js event loop slows → plugin fails ping → cascade crash.
+        "type": "string",
         "name": "Hikvision alertStream socket cleanup — destroy TCP socket on stream close/error",
         "file": "/root/.scrypted/volume/plugins/@scrypted/hikvision/zip/unzipped/main.nodejs.js",
         "old": '.catch((()=>n.destroy())),e})),this.listenerPromis',
@@ -28,6 +78,7 @@ PATCHES = [
         # old HTTP socket in CLOSE-WAIT indefinitely.  Cameras with a 2-connection limit
         # (HI-IP3B OEM firmware) fill up and start dropping connections, which causes the
         # ONVIF plugin event loop to stall and fail its ping → cascade crash of all plugins.
+        "type": "string",
         "name": "ONVIF socket cleanup — destroy TCP socket on subscription teardown",
         "file": "/root/.scrypted/volume/plugins/@scrypted/onvif/zip/unzipped/main.nodejs.js",
         "old": 'destroy(){clearTimeout(o);try{t.unsubscribe()}catch(e){console.warn("Error unsubscribing",e)}}',
@@ -36,6 +87,7 @@ PATCHES = [
         "pyc": None,
     },
     {
+        "type": "string",
         "name": "HomeKit snapshot timeout — prevent hung camera from crashing plugin",
         "file": "/root/.scrypted/volume/plugins/@scrypted/homekit/zip/unzipped/main.nodejs.js",
         "old": "void r(null,await s(e));r(null,await s(e))",
@@ -49,68 +101,7 @@ PATCHES = [
         "pyc": None,
     },
     {
-        # When canMixin() throws "not implemented" (plugin loading/restarting),
-        # the catch block sets error=e (truthy). The ensureProxy() then merges old
-        # interfaces back, calls setPluginDeviceState → changed=true →
-        # notifyPluginDeviceDescriptorChanged → rebuildMixinTable → infinite loop.
-        # Load average spikes to 19+, plugin pings fail, all plugins restart in cascade.
-        # Fix: treat "not implemented" as a temporary passthrough (no error flag),
-        # so the interface set stabilizes and the notify loop stops.
-        "name": "Server rebuildEntry — canMixin 'not implemented' treated as passthrough to break infinite loop",
-        "file": "/server/node_modules/@scrypted/server/dist/plugin/plugin-device.js",
-        "old": (
-            "        catch (e) {\n"
-            "            // on any error, do not advertise interfaces\n"
-            "            // on this mixin, so as to prevent total failure?\n"
-            "            // this has been the behavior for a while,\n"
-            "            // but maybe interfaces implemented by that mixin\n"
-            "            // should rethrow the error caught here in applyMixin.\n"
-            "            console.error('Mixin error', e);\n"
-            "            return {\n"
-            "                passthrough: false,\n"
-            "                allInterfaces,\n"
-            "                interfaces: new Set(),\n"
-            "                error: e,\n"
-            "                proxy: undefined,\n"
-            "            };\n"
-            "        }"
-        ),
-        "new": (
-            "        catch (e) {\n"
-            "            // When canMixin throws \"not implemented\", the mixin provider plugin is\n"
-            "            // loading or temporarily unavailable. Treat as passthrough (no error)\n"
-            "            // so the notify loop doesn't spin: error=true causes interface merging\n"
-            "            // which triggers notifyPluginDeviceDescriptorChanged which triggers\n"
-            "            // another rebuildMixinTable indefinitely.\n"
-            "            if (e?.message?.includes('not implemented')) {\n"
-            "                console.warn(`Mixin provider ${mixinId} canMixin threw \"not implemented\" for ${this.id} — treating as temporary passthrough.`);\n"
-            "                return {\n"
-            "                    passthrough: true,\n"
-            "                    allInterfaces,\n"
-            "                    interfaces: new Set(),\n"
-            "                    error: undefined,\n"
-            "                    proxy: undefined,\n"
-            "                };\n"
-            "            }\n"
-            "            // on any error, do not advertise interfaces\n"
-            "            // on this mixin, so as to prevent total failure?\n"
-            "            // this has been the behavior for a while,\n"
-            "            // but maybe interfaces implemented by that mixin\n"
-            "            // should rethrow the error caught here in applyMixin.\n"
-            "            console.error('Mixin error', e);\n"
-            "            return {\n"
-            "                passthrough: false,\n"
-            "                allInterfaces,\n"
-            "                interfaces: new Set(),\n"
-            "                error: e,\n"
-            "                proxy: undefined,\n"
-            "            };\n"
-            "        }"
-        ),
-        "verify": "canMixin threw \"not implemented\"",
-        "pyc": None,
-    },
-    {
+        "type": "string",
         "name": "OpenVINO GPU THROUGHPUT mode",
         "file": "/root/.scrypted/volume/plugins/@scrypted/openvino/zip/unzipped/ov/__init__.py",
         "old": '"GPU_QUEUE_THROTTLE": "MEDIUM",\n                    "PERFORMANCE_HINT": "LATENCY",',
@@ -118,19 +109,55 @@ PATCHES = [
         "verify": '"GPU_QUEUE_THROTTLE": "LOW"',
         "pyc": "/root/.scrypted/volume/plugins/@scrypted/openvino/zip/unzipped/ov/__pycache__/__init__.cpython-312.pyc",
     },
-    # NOTE: Removed fps:8 cap patch — was a no-op for NVR object detection
-    # because model.decoder=true causes generateVideoFrames() to be bypassed entirely.
-    # See README.md for details.
 ]
 
 import os
+import shutil
 import subprocess
 
 all_ok = True
 
 for patch in PATCHES:
-    path = patch["file"]
+    patch_type = patch.get("type", "string")
     print(f"\n[Patch] {patch['name']}")
+
+    if patch_type == "copy":
+        src = patch["src"]
+        dst = patch["dst"]
+        verify_src = patch.get("verify_src", "")
+
+        if not os.path.exists(src):
+            print(f"  ✗ Source not found: {src} — rebuild the fork first: cd /root/scrypted/fork/server && npm run build")
+            all_ok = False
+            continue
+
+        # Check source has expected content
+        with open(src, "r", errors="replace") as f:
+            src_content = f.read()
+        if verify_src and verify_src not in src_content:
+            print(f"  ✗ Source missing expected marker '{verify_src}' — rebuild may be stale")
+            all_ok = False
+            continue
+
+        # Check if dst already matches src
+        if os.path.exists(dst):
+            with open(dst, "r", errors="replace") as f:
+                dst_content = f.read()
+            if dst_content == src_content:
+                print(f"  ✓ Already up to date")
+                continue
+            # Backup existing
+            backup = dst + ".pre-patch-backup"
+            shutil.copy2(dst, backup)
+            print(f"  → Backup: {backup}")
+
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+        print(f"  ✓ Copied")
+        continue
+
+    # Default: "string" patch
+    path = patch["file"]
 
     if not os.path.exists(path):
         print(f"  ✗ File not found: {path}")
@@ -162,7 +189,7 @@ for patch in PATCHES:
         f.write(content)
 
     # Clear pyc cache if applicable
-    if patch["pyc"] and os.path.exists(patch["pyc"]):
+    if patch.get("pyc") and os.path.exists(patch["pyc"]):
         os.remove(patch["pyc"])
         print(f"  → Cleared pyc cache")
 

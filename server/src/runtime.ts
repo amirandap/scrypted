@@ -30,6 +30,7 @@ import { PluginDebug } from './plugin/plugin-debug';
 import { PluginDeviceProxyHandler } from './plugin/plugin-device';
 import { PluginHost, UnsupportedRuntimeError } from './plugin/plugin-host';
 import { isConnectionUpgrade, PluginHttp } from './plugin/plugin-http';
+import { MixinRebuildScheduler } from './plugin/mixin-rebuild-scheduler';
 import { WebSocketConnection } from './plugin/plugin-remote-websocket';
 import { getPluginVolume } from './plugin/plugin-volume';
 import { getBuiltinRuntimeHosts } from './plugin/runtime/runtime-host';
@@ -70,6 +71,7 @@ export class ScryptedRuntime extends PluginHttp<HttpPluginData> {
     pluginDevices: { [id: string]: PluginDevice } = {};
     devices: { [id: string]: DeviceProxyPair } = {};
     stateManager = new ScryptedStateManager(this);
+    mixinRebuildScheduler = new MixinRebuildScheduler(this);
     logger = new Logger(this, '', 'Scrypted');
     devicesLogger = this.logger.getLogger('device', 'Devices');
     override wss = new WebSocketServer({ noServer: true });
@@ -485,7 +487,8 @@ export class ScryptedRuntime extends PluginHttp<HttpPluginData> {
         const proxyPair = this.devices[id];
         if (!proxyPair)
             return undefined;
-        proxyPair.handler.rebuildMixinTable();
+        // Use scheduler so even single-device rebuilds are deferred and deduplicated.
+        this.mixinRebuildScheduler.schedule(id);
         return proxyPair;
     }
 
@@ -531,20 +534,12 @@ export class ScryptedRuntime extends PluginHttp<HttpPluginData> {
         }
 
         // second pass:
-        // rebuild the mixin tables — staggered via setImmediate so each camera rebuild
-        // yields to the I/O phase between rebuilds. This prevents the combined flood of
-        // concurrent RPC calls from starving plugin ping callbacks and cascade-killing
-        // all plugins whenever any single plugin restarts.
-        const rebuildIds = [...ret];
-        const scheduleNext = () => {
-            const id = rebuildIds.shift();
-            if (!id)
-                return;
-            const device = this.devices[id];
-            device?.handler.rebuildMixinTable();
-            setImmediate(scheduleNext);
-        };
-        setImmediate(scheduleNext);
+        // Hand all affected devices to the MixinRebuildScheduler which:
+        //  - deduplicates concurrent requests for the same device
+        //  - processes one at a time with a setImmediate yield between each
+        //  - guards against rebuild-triggered re-enqueue causing re-entry
+        for (const id of ret)
+            this.mixinRebuildScheduler.schedule(id);
 
         return ret;
     }

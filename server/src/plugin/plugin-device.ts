@@ -4,6 +4,7 @@ import path from 'path';
 import { PluginDevice } from "../db-types";
 import { getDisplayType } from "../infer-defaults";
 import { PrimitiveProxyHandler, RpcPeer } from "../rpc";
+import { classifyRpcError, isRpcPassthrough } from "../rpc-errors";
 import { ScryptedRuntime } from "../runtime";
 import { sleep } from "../sleep";
 import { getState } from "../state";
@@ -212,7 +213,8 @@ export class PluginDeviceProxyHandler implements PrimitiveProxyHandler<any> {
 
             const changed = this.scrypted.stateManager.setPluginDeviceState(pluginDevice, ScryptedInterfaceProperty.interfaces, PluginDeviceProxyHandler.sortInterfaces(entry.allInterfaces));
             if (changed)
-                this.scrypted.notifyPluginDeviceDescriptorChanged(pluginDevice);
+                // Defer notification to break synchronous rebuild→notify→rebuild chains.
+                setImmediate(() => this.scrypted.notifyPluginDeviceDescriptorChanged(pluginDevice));
             return pluginDevice;
         });
     }
@@ -300,16 +302,18 @@ export class PluginDeviceProxyHandler implements PrimitiveProxyHandler<any> {
             };
         }
         catch (e) {
-            // When canMixin throws "not implemented", the mixin provider plugin is
-            // loading or temporarily unavailable. Treat as passthrough (no error flag)
-            // to prevent an infinite rebuild loop:
-            //   error=true → ensureProxy merges old interfaces → setPluginDeviceState
-            //   sees a change → notifyPluginDeviceDescriptorChanged → rebuildMixinTable
-            //   → another canMixin call → throws again → repeat indefinitely.
-            // Returning error=undefined keeps the interface set stable so notify is
-            // never triggered and the loop stops naturally once the plugin is ready.
-            if ((e as Error)?.message?.includes('not implemented')) {
-                console.warn(`Mixin provider ${mixinId} canMixin threw "not implemented" for ${this.id} — treating as temporary passthrough.`);
+            // Classify the error so we can apply the correct recovery strategy
+            // instead of treating all failures identically (which caused infinite loops).
+            const errorClass = classifyRpcError(e);
+
+            if (isRpcPassthrough(e)) {
+                // Transient / timeout / killed: plugin is loading or temporarily unavailable.
+                // Return a passthrough entry with error=undefined so that:
+                //   (a) interface set does not change → notifyPluginDeviceDescriptorChanged is
+                //       NOT triggered → no immediate rebuild loop.
+                //   (b) The mixin is silently skipped until the next full rebuild cycle.
+                const logLevel = errorClass === 'timeout' ? 'warn' : 'log';
+                console[logLevel](`Mixin provider ${mixinId} ${errorClass} error for ${this.id} — passthrough until next cycle.`, (e as Error)?.message);
                 return {
                     passthrough: true,
                     allInterfaces,
@@ -318,12 +322,35 @@ export class PluginDeviceProxyHandler implements PrimitiveProxyHandler<any> {
                     proxy: undefined!,
                 };
             }
-            // on any error, do not advertise interfaces
-            // on this mixin, so as to prevent total failure?
-            // this has been the behavior for a while,
-            // but maybe interfaces implemented by that mixin
-            // should rethrow the error caught here in applyMixin.
-            console.error('Mixin error', e);
+
+            if (errorClass === 'permanent') {
+                // Permanent: explicit rejection (wrong type, not found, etc.).
+                // Remove the offending mixin from the device's mixin list so it is
+                // not retried repeatedly. Do NOT trigger a notification here; the
+                // state write itself will be picked up on the next rebuild cycle.
+                console.error(`Mixin provider ${mixinId} permanently rejected ${this.id} — removing from mixin list.`, (e as Error)?.message);
+                const mixins: string[] = getState(pluginDevice, ScryptedInterfaceProperty.mixins) || [];
+                const filtered = mixins.filter(mid => mid !== mixinId);
+                if (filtered.length !== mixins.length) {
+                    this.scrypted.stateManager.setPluginDeviceState(pluginDevice, ScryptedInterfaceProperty.mixins, filtered);
+                    this.scrypted.datastore.upsert(pluginDevice);
+                    // Notify deferred — scheduler will pick this up, preventing synchronous loops.
+                    setImmediate(() => this.scrypted.notifyPluginDeviceDescriptorChanged(pluginDevice));
+                }
+                return {
+                    passthrough: true,
+                    allInterfaces,
+                    interfaces: new Set<string>(),
+                    error: undefined!,
+                    proxy: undefined!,
+                };
+            }
+
+            // Unknown error — log verbosely and set error flag.
+            // error=true is kept here deliberately so the interface-merge fallback
+            // runs in ensureProxy(), but the setImmediate defers the notification
+            // to break any synchronous retry loop.
+            console.error('Mixin error (unknown)', e);
             return {
                 passthrough: false,
                 allInterfaces,
