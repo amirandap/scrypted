@@ -2,3 +2,9 @@
 __pycache__
 venv
 .venv
+package-lock.json
+common/package-lock.json
+plugins/ffmpeg-camera/package-lock.json
+plugins/onvif/package-lock.json
+plugins/rtsp/package-lock.json
+sdk/package-lock.json

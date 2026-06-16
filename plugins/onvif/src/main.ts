@@ -184,9 +184,12 @@ class OnvifCamera extends RtspSmartCamera implements ObjectDetector, Intercom, V
 
 
     async listenEvents() {
-        const client = await this.createClient();
+        // One-time device capability discovery with a throwaway client.
+        // Kept separate so it doesn't block the self-healing subscription loop.
         try {
-            const eventTypes = await client.getEventTypes();
+            const initClient = await this.createClient();
+            const eventTypes = await initClient.getEventTypes().catch(() => [] as string[]);
+            initClient.destroy();
             if (eventTypes?.length && this.storage.getItem('onvifDetector') !== 'true') {
                 this.storage.setItem('onvifDetector', 'true');
                 this.updateDevice();
@@ -195,7 +198,9 @@ class OnvifCamera extends RtspSmartCamera implements ObjectDetector, Intercom, V
         catch (e) {
         }
 
-        return listenEvents(this, client);
+        // Pass a factory so listenEvents can silently reconnect on its own
+        // without triggering a full outer listenLoop restart on every disconnect.
+        return listenEvents(this, () => this.createClient());
     }
 
     createClient() {
@@ -209,7 +214,7 @@ class OnvifCamera extends RtspSmartCamera implements ObjectDetector, Intercom, V
     }
 
     showRtspUrlOverride() {
-        return false;
+        return this.storage.getItem('enableRtspUrlOverride') === 'true';
     }
 
     showRtspPortOverride() {
@@ -229,6 +234,14 @@ class OnvifCamera extends RtspSmartCamera implements ObjectDetector, Intercom, V
 
         const ret: Setting[] = [
             ...await super.getOtherSettings(),
+            {
+                subgroup: 'Advanced',
+                key: 'enableRtspUrlOverride',
+                title: 'RTSP URL Override',
+                description: 'Enable to manually specify RTSP stream URLs, overriding those discovered via ONVIF. Useful for routing streams through a relay proxy (e.g., go2rtc) when the camera has limited simultaneous TCP connection capacity.',
+                type: 'boolean',
+                value: this.storage.getItem('enableRtspUrlOverride') === 'true',
+            },
             {
                 subgroup: 'Advanced',
                 title: 'Onvif Doorbell',
