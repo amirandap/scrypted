@@ -1,3 +1,5 @@
+import { RPC_DEFAULT_TIMEOUT_MS, RPC_TIMEOUT_MAP, RpcTimeoutError } from './rpc-timeout';
+
 export function startPeriodicGarbageCollection() {
     if (!globalThis.gc) {
         console.warn('rpc peer garbage collection not available: global.gc is not exposed.');
@@ -239,6 +241,9 @@ export class RPCResultError extends Error {
     }
 }
 
+// Re-export so callers can import all RPC error types from one place.
+export { RpcTimeoutError } from './rpc-timeout';
+
 declare class WeakRef<T> {
     target: T;
     constructor(target: any);
@@ -419,18 +424,36 @@ export class RpcPeer {
         return [...new Array(8)].map(() => RpcPeer.RANDOM_DIGITS.charAt(Math.floor(Math.random() * RpcPeer.RANDOM_DIGITS.length))).join('');
     }
 
-    createPendingResult(method: string, cb: (id: string, reject: (e: Error) => void) => void): Promise<any> {
+    createPendingResult(method: string, cb: (id: string, reject: (e: Error) => void) => void, timeoutMs?: number): Promise<any> {
         if (Object.isFrozen(this.pendingResults))
             return Promise.reject(new RPCResultError(this, 'RpcPeer has been killed (createPendingResult)'));
 
+        const ms = timeoutMs ?? RPC_TIMEOUT_MAP[method] ?? RPC_DEFAULT_TIMEOUT_MS;
+
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
         const promise = new Promise((resolve, reject) => {
             const id = RpcPeer.generateId();
-            this.pendingResults[id] = { resolve, reject, method };
 
-            cb(id, e => reject(new RPCResultError(this, e.message, e)));
+            const resolveWithCleanup = (value: any) => {
+                if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+                resolve(value);
+            };
+            const rejectWithCleanup = (e: Error) => {
+                if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+                reject(e);
+            };
+
+            this.pendingResults[id] = { resolve: resolveWithCleanup, reject: rejectWithCleanup, method };
+
+            timeoutHandle = setTimeout(() => {
+                delete this.pendingResults[id];
+                reject(new RpcTimeoutError(method, ms));
+            }, ms);
+
+            cb(id, e => rejectWithCleanup(new RPCResultError(this, e.message, e)));
         });
 
-        // todo: make this an option so rpc doesn't nuke the process if uncaught?
+        // Swallow unhandled rejections — callers opt in to error handling.
         promise.catch(() => { });
 
         return promise;
